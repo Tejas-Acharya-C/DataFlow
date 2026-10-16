@@ -53,3 +53,31 @@ def compare_versions(version_a: DatasetVersion, version_b: DatasetVersion) -> Di
         "columns_retained": retained,
         "schema_changes": schema_changes,
     }
+
+
+def build_lineage_graph(versions: list[DatasetVersion]) -> Dict[str, Any]:
+    """Build node-edge graph representation of version lineage."""
+    nodes = []
+    edges = []
+
+    for v in versions:
+        nodes.append({
+            "id": v.id,
+            "version_number": v.version_number,
+            "row_count": v.row_count,
+            "column_count": v.column_count,
+            "creation_reason": v.creation_reason,
+            "created_at": v.created_at.isoformat() if v.created_at else None,
+            "parent_version_id": v.parent_version_id,
+        })
+        if v.parent_version_id:
+            edges.append({
+                "source": v.parent_version_id,
+                "target": v.id,
+                "transformation": v.transformation_details,
+            })
+
+    return {
+        "nodes": sorted(nodes, key=lambda n: n["version_number"]),
+        "edges": edges,
+    }

@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from dataflow.api.deps import get_db, get_storage_manager
 from dataflow.models.dataset import DatasetVersion
 from dataflow.schemas.dataset import DatasetVersionResponse, VersionCompareResponse
-from dataflow.services.lineage import compare_versions
+from dataflow.services.lineage import build_lineage_graph, compare_versions
 from dataflow.storage.local import LocalStorageManager
 
 router = APIRouter(prefix="/versions", tags=["Versions"])
@@ -79,3 +79,20 @@ def compare_dataset_versions(
 
     diff = compare_versions(va, vb)
     return VersionCompareResponse(**diff)
+
+
+@router.get("/{version_id}/lineage")
+def get_version_lineage(
+    version_id: str,
+    db: Session = Depends(get_db),
+):
+    """Retrieve the lineage graph for the dataset associated with this version."""
+    v = db.get(DatasetVersion, version_id)
+    if not v:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Version not found.")
+    versions = db.scalars(
+        select(DatasetVersion)
+        .where(DatasetVersion.dataset_id == v.dataset_id)
+        .order_by(DatasetVersion.version_number.asc())
+    ).all()
+    return build_lineage_graph(list(versions))

@@ -9,6 +9,8 @@ from dataflow.config import get_settings
 router = APIRouter(prefix="/health", tags=["Health"])
 
 
+@router.get("", status_code=status.HTTP_200_OK)
+@router.get("/", status_code=status.HTTP_200_OK)
 @router.get("/live", status_code=status.HTTP_200_OK)
 def liveness():
     """Liveness probe indicating service is running."""

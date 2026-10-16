@@ -48,3 +48,12 @@ def test_transformations_and_comparison_api(client):
     comp_data = comp_res.json()
     assert "temperature_f" in comp_data["columns_added"]
     assert "temp" in comp_data["columns_removed"]
+
+    # Verify lineage endpoint
+    lineage_res = client.get(f"/api/v1/versions/{v2_id}/lineage")
+    assert lineage_res.status_code == 200
+    lineage_data = lineage_res.json()
+    assert len(lineage_data["nodes"]) == 2
+    assert len(lineage_data["edges"]) == 1
+    assert lineage_data["edges"][0]["source"] == v1_id
+    assert lineage_data["edges"][0]["target"] == v2_id
