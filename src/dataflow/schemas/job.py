@@ -15,7 +15,11 @@ class JobResponse(BaseModel):
     version_id: Optional[str] = None
     status: str
     progress: int
+    attempts: int = 1
+    max_attempts: int = 1
     error_message: Optional[str] = None
+    error_category: Optional[str] = None
+    duration_ms: Optional[int] = None
     metadata_json: Optional[Dict[str, Any]] = None
     created_at: datetime
     finished_at: Optional[datetime] = None

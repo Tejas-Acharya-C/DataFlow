@@ -2,7 +2,7 @@
 
 from functools import lru_cache
 from pathlib import Path
-from typing import List, Union
+from typing import List, Optional, Union
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -63,6 +63,17 @@ class Settings(BaseSettings):
         default=20,
         alias="MAX_VALIDATION_EXAMPLES",
     )
+
+    # Reliability and retry policies
+    MAX_RETRIES: int = Field(default=3, alias="MAX_RETRIES")
+    RETRY_BACKOFF_FACTOR: float = Field(default=0.5, alias="RETRY_BACKOFF_FACTOR")
+    RETRY_MAX_BACKOFF_SECONDS: float = Field(default=10.0, alias="RETRY_MAX_BACKOFF_SECONDS")
+    RETRY_JITTER: bool = Field(default=True, alias="RETRY_JITTER")
+    DEFAULT_TIMEOUT_SECONDS: float = Field(default=30.0, alias="DEFAULT_TIMEOUT_SECONDS")
+
+    # Security & API Authentication
+    API_KEY: Optional[str] = Field(default=None, alias="DATAFLOW_API_KEY")
+    AUTH_ENABLED: bool = Field(default=False, alias="AUTH_ENABLED")
 
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod

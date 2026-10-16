@@ -1,14 +1,15 @@
-"""Data contract validation execution service."""
-
-from typing import List, Optional
+import uuid
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from dataflow.models.contract import DataContract, ValidationRun
+from dataflow.models.contract import DataContract, ValidationRejection, ValidationRun
 from dataflow.models.dataset import DatasetVersion
 from dataflow.schemas.contract import CheckResult
 from dataflow.services.audit import complete_job, create_job, log_audit
+from dataflow.services.retry import classify_exception
 from dataflow.storage.local import LocalStorageManager
 
 
@@ -37,6 +38,7 @@ class ValidationService:
             df = self.storage.load_dataframe(version.storage_path)
             rules = contract.rules_json or {}
             check_results: List[CheckResult] = []
+            row_errors: Dict[int, List[Dict[str, Any]]] = {}
 
             actual_cols = list(df.columns)
             row_count = len(df)
@@ -151,6 +153,12 @@ class ValidationService:
                     if not allowed_null and null_count > 0:
                         fail_rate = round(null_count / row_count, 4) if row_count > 0 else 1.0
                         sample_indices = df[null_mask].index[:10].tolist()
+                        for v_idx in df[null_mask].index:
+                            row_errors.setdefault(int(v_idx), []).append({
+                                "rule": "not_null",
+                                "column": col,
+                                "message": f"Column '{col}' is null but marked non-nullable.",
+                            })
                         check_results.append(
                             CheckResult(
                                 name=f"not_null:{col}",
@@ -182,10 +190,18 @@ class ValidationService:
             for col in unique_cols:
                 if col in actual_cols:
                     non_null = df[col].dropna()
+                    dup_mask = df[col].duplicated(keep=False) & df[col].notna()
                     dup_count = int(non_null.duplicated().sum())
                     if dup_count > 0:
                         fail_rate = round(dup_count / len(non_null), 4) if len(non_null) > 0 else 1.0
                         dups = non_null[non_null.duplicated()].head(10).tolist()
+                        for v_idx in df[dup_mask].index:
+                            val = df.at[v_idx, col]
+                            row_errors.setdefault(int(v_idx), []).append({
+                                "rule": "uniqueness",
+                                "column": col,
+                                "message": f"Column '{col}' has duplicate value: {val}",
+                            })
                         check_results.append(
                             CheckResult(
                                 name=f"uniqueness:{col}",
@@ -219,30 +235,44 @@ class ValidationService:
                     non_null = df[col].dropna()
                     mismatches = []
                     if expected_type == "int":
-                        for val in non_null:
+                        for idx, val in non_null.items():
                             try:
                                 if not float(val).is_integer():
                                     mismatches.append(val)
+                                    row_errors.setdefault(int(idx), []).append({
+                                        "rule": "column_type",
+                                        "column": col,
+                                        "message": f"Value '{val}' cannot be parsed as integer.",
+                                    })
                             except (ValueError, TypeError):
                                 mismatches.append(val)
-                            if len(mismatches) >= 10:
-                                break
+                                row_errors.setdefault(int(idx), []).append({
+                                    "rule": "column_type",
+                                    "column": col,
+                                    "message": f"Value '{val}' cannot be parsed as integer.",
+                                })
                     elif expected_type == "float":
-                        for val in non_null:
+                        for idx, val in non_null.items():
                             try:
                                 float(val)
                             except (ValueError, TypeError):
                                 mismatches.append(val)
-                            if len(mismatches) >= 10:
-                                break
+                                row_errors.setdefault(int(idx), []).append({
+                                    "rule": "column_type",
+                                    "column": col,
+                                    "message": f"Value '{val}' cannot be parsed as float.",
+                                })
                     elif expected_type == "datetime":
-                        for val in non_null:
+                        for idx, val in non_null.items():
                             try:
                                 pd.to_datetime(val)
                             except (ValueError, TypeError):
                                 mismatches.append(val)
-                            if len(mismatches) >= 10:
-                                break
+                                row_errors.setdefault(int(idx), []).append({
+                                    "rule": "column_type",
+                                    "column": col,
+                                    "message": f"Value '{val}' cannot be parsed as datetime.",
+                                })
 
                     if mismatches:
                         check_results.append(
@@ -254,7 +284,7 @@ class ValidationService:
                                 message=f"Column '{col}' has values incompatible with expected type '{expected_type}'.",
                                 affected_column=col,
                                 failed_count=len(mismatches),
-                                sample_failures=mismatches,
+                                sample_failures=mismatches[:10],
                                 recommendation=f"Cast column '{col}' to '{expected_type}' or clean invalid values.",
                             )
                         )
@@ -276,7 +306,15 @@ class ValidationService:
                 if col in actual_cols:
                     non_null = df[col].dropna()
                     allowed_set = set(str(v) for v in allowed_vals)
-                    invalid = [v for v in non_null if str(v) not in allowed_set]
+                    invalid = []
+                    for idx, val in non_null.items():
+                        if str(val) not in allowed_set:
+                            invalid.append(val)
+                            row_errors.setdefault(int(idx), []).append({
+                                "rule": "allowed_values",
+                                "column": col,
+                                "message": f"Value '{val}' is not in permitted set {allowed_vals}.",
+                            })
                     if invalid:
                         check_results.append(
                             CheckResult(
@@ -307,14 +345,26 @@ class ValidationService:
             range_rules = rules.get("numeric_ranges", {})
             for col, range_cfg in range_rules.items():
                 if col in actual_cols:
-                    numeric_s = pd.to_numeric(df[col], errors="coerce").dropna()
                     min_val = range_cfg.get("min")
                     max_val = range_cfg.get("max")
                     violators = []
-                    if min_val is not None:
-                        violators.extend(numeric_s[numeric_s < min_val].head(5).tolist())
-                    if max_val is not None:
-                        violators.extend(numeric_s[numeric_s > max_val].head(5).tolist())
+                    for idx, val in df[col].dropna().items():
+                        try:
+                            num = float(val)
+                            is_violation = False
+                            if min_val is not None and num < min_val:
+                                is_violation = True
+                            if max_val is not None and num > max_val:
+                                is_violation = True
+                            if is_violation:
+                                violators.append(num)
+                                row_errors.setdefault(int(idx), []).append({
+                                    "rule": "numeric_range",
+                                    "column": col,
+                                    "message": f"Value {num} outside expected range [{min_val}, {max_val}].",
+                                })
+                        except (ValueError, TypeError):
+                            pass
 
                     if violators:
                         check_results.append(
@@ -347,22 +397,71 @@ class ValidationService:
             failed_count = sum(1 for c in check_results if c.status == "failed")
             overall_status = "passed" if failed_count == 0 else "failed"
 
+            # Row-level quarantine and accepted/rejected partitioning
+            invalid_indices = sorted(list(row_errors.keys()))
+            rejected_rows_count = len(invalid_indices)
+            accepted_rows_count = row_count - rejected_rows_count
+
+            run_id = str(uuid.uuid4())
+            quarantine_path = None
+            clean_path = None
+
+            if rejected_rows_count > 0:
+                rejected_df = df.iloc[invalid_indices].copy()
+                quarantine_path, _, _ = self.storage.save_dataframe(
+                    dataset_id=version.dataset_id,
+                    version_id=f"quarantine_{run_id[:8]}",
+                    df=rejected_df,
+                )
+
+            if accepted_rows_count > 0:
+                clean_df = df.drop(index=invalid_indices).copy()
+                clean_path, _, _ = self.storage.save_dataframe(
+                    dataset_id=version.dataset_id,
+                    version_id=f"clean_{run_id[:8]}",
+                    df=clean_df,
+                )
+
             run = ValidationRun(
+                id=run_id,
                 dataset_id=version.dataset_id,
                 version_id=version.id,
                 contract_id=contract.id,
                 status=overall_status,
                 passed_count=passed_count,
                 failed_count=failed_count,
+                accepted_rows=accepted_rows_count,
+                rejected_rows=rejected_rows_count,
+                quarantine_path=quarantine_path,
+                clean_path=clean_path,
                 results_json={
                     "contract_name": contract.name,
                     "overall_status": overall_status,
                     "passed_count": passed_count,
                     "failed_count": failed_count,
+                    "accepted_rows": accepted_rows_count,
+                    "rejected_rows": rejected_rows_count,
+                    "quarantine_path": quarantine_path,
+                    "clean_path": clean_path,
                     "checks": [c.model_dump() for c in check_results],
                 },
             )
             db.add(run)
+
+            # Persist row-level rejection details for audit and diagnosis
+            for idx in invalid_indices:
+                raw_row = df.iloc[idx].to_dict()
+                clean_raw = {str(k): (None if pd.isna(v) else v) for k, v in raw_row.items()}
+                rejection = ValidationRejection(
+                    run_id=run_id,
+                    dataset_id=version.dataset_id,
+                    version_id=version.id,
+                    row_number=idx + 1,
+                    raw_data=clean_raw,
+                    failure_reasons=row_errors[idx],
+                )
+                db.add(rejection)
+
             db.commit()
             db.refresh(run)
 
@@ -378,6 +477,8 @@ class ValidationService:
                     "status": overall_status,
                     "passed_count": passed_count,
                     "failed_count": failed_count,
+                    "accepted_rows": accepted_rows_count,
+                    "rejected_rows": rejected_rows_count,
                 },
             )
 
@@ -386,7 +487,8 @@ class ValidationService:
 
         except Exception as exc:
             db.rollback()
-            complete_job(db, job, status="failed", error_message=str(exc))
+            err_cat = classify_exception(exc)
+            complete_job(db, job, status="failed", error_message=str(exc), error_category=err_cat)
             log_audit(
                 db,
                 event_type="validation.failed",
@@ -395,6 +497,21 @@ class ValidationService:
                 outcome="failure",
                 dataset_id=version.dataset_id,
                 version_id=version.id,
-                details={"error": str(exc)},
+                details={"error": str(exc), "error_category": err_cat},
             )
             raise
+
+    def get_rejections(
+        self,
+        db: Session,
+        run_id: str,
+        skip: int = 0,
+        limit: int = 50,
+    ) -> Tuple[List[ValidationRejection], int]:
+        """Fetch paginated row-level rejections for a validation run."""
+        stmt = select(ValidationRejection).where(ValidationRejection.run_id == run_id)
+        total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+        items = db.scalars(
+            stmt.order_by(ValidationRejection.row_number.asc()).offset(skip).limit(limit)
+        ).all()
+        return list(items), total

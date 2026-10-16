@@ -67,5 +67,30 @@ class ValidationRunResponse(BaseModel):
     status: str  # passed, failed, warning
     passed_count: int
     failed_count: int
+    accepted_rows: int = 0
+    rejected_rows: int = 0
+    quarantine_path: Optional[str] = None
+    clean_path: Optional[str] = None
     results_json: Dict[str, Any]
     executed_at: datetime
+
+
+class ValidationRejectionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    run_id: str
+    dataset_id: str
+    version_id: str
+    row_number: int
+    raw_data: Dict[str, Any]
+    failure_reasons: List[Dict[str, Any]]
+    created_at: datetime
+
+
+class ValidationRejectionListResponse(BaseModel):
+    items: List[ValidationRejectionResponse]
+    total: int
+    run_id: str
+    accepted_rows: int
+    rejected_rows: int

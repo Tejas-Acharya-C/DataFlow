@@ -64,6 +64,7 @@ class IngestionService:
         dataset_name: Optional[str] = None,
         dataset_id: Optional[str] = None,
         description: Optional[str] = None,
+        deduplicate_identical: bool = True,
     ) -> Tuple[Dataset, DatasetVersion]:
         """
         Process uploaded CSV file, validate format, store file, and record dataset metadata.
@@ -115,7 +116,10 @@ class IngestionService:
 
             # Resolve or create Dataset
             if dataset_id:
-                dataset = db.get(Dataset, dataset_id)
+                stmt = select(Dataset).where(Dataset.id == dataset_id)
+                if db.bind and db.bind.dialect.name == "postgresql":
+                    stmt = stmt.with_for_update()
+                dataset = db.scalar(stmt)
                 if not dataset or dataset.is_deleted:
                     raise IngestionError(f"Dataset with ID {dataset_id} not found.")
             else:
@@ -128,7 +132,52 @@ class IngestionService:
                 db.add(dataset)
                 db.flush()
 
-            # Determine next version number
+            # Save stream to storage safely
+            version_id = str(uuid.uuid4())
+            try:
+                rel_path, file_size, checksum = self.storage.save_stream(
+                    dataset_id=dataset.id,
+                    version_id=version_id,
+                    file_stream=file_obj,
+                )
+            except StorageError as se:
+                raise IngestionError(str(se))
+
+            # Idempotency check: if identical content version already exists under this dataset, deduplicate
+            if deduplicate_identical:
+                existing_version = db.scalar(
+                    select(DatasetVersion)
+                    .where(
+                        DatasetVersion.dataset_id == dataset.id,
+                        DatasetVersion.checksum == checksum,
+                    )
+                    .order_by(DatasetVersion.version_number.desc())
+                )
+                if existing_version:
+                    # Clean up redundant duplicate file
+                    self.storage.delete_artifact(rel_path)
+                    complete_job(
+                        db,
+                        job,
+                        status="succeeded",
+                        metadata={"idempotent_hit": True, "existing_version_id": existing_version.id},
+                    )
+                    log_audit(
+                        db,
+                        event_type="dataset.upload_idempotent",
+                        entity_type="dataset",
+                        entity_id=dataset.id,
+                        dataset_id=dataset.id,
+                        version_id=existing_version.id,
+                        details={
+                            "message": "Content identical to existing version; deduplicated.",
+                            "existing_version_number": existing_version.version_number,
+                            "checksum": checksum,
+                        },
+                    )
+                    return dataset, existing_version
+
+            # Determine next version number within locked dataset context
             latest_version_num = (
                 db.scalar(
                     select(func.max(DatasetVersion.version_number)).where(
@@ -138,17 +187,6 @@ class IngestionService:
                 or 0
             )
             next_version_num = latest_version_num + 1
-            version_id = str(uuid.uuid4())
-
-            # Save stream to storage safely
-            try:
-                rel_path, file_size, checksum = self.storage.save_stream(
-                    dataset_id=dataset.id,
-                    version_id=version_id,
-                    file_stream=file_obj,
-                )
-            except StorageError as se:
-                raise IngestionError(str(se))
 
             # Inspect full dataframe for exact row/column metrics
             full_df = self.storage.load_dataframe(rel_path)
@@ -196,13 +234,15 @@ class IngestionService:
 
         except Exception as exc:
             db.rollback()
-            complete_job(db, job, status="failed", error_message=str(exc))
+            from dataflow.services.retry import classify_exception
+            err_category = classify_exception(exc)
+            complete_job(db, job, status="failed", error_message=str(exc), error_category=err_category)
             log_audit(
                 db,
                 event_type="dataset.upload_failed",
                 entity_type="dataset",
                 entity_id=dataset_id or "unknown",
                 outcome="failure",
-                details={"error": str(exc), "filename": filename},
+                details={"error": str(exc), "error_category": err_category, "filename": filename},
             )
             raise

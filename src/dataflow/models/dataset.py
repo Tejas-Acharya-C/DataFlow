@@ -93,3 +93,32 @@ class DatasetVersion(Base):
     parent_version: Mapped[Optional["DatasetVersion"]] = relationship(
         "DatasetVersion", remote_side=[id]
     )
+
+
+class IngestionCheckpoint(Base):
+    """Tracks watermarks and cursor progress for incremental data sources."""
+
+    __tablename__ = "ingestion_checkpoints"
+    __table_args__ = (
+        UniqueConstraint("source_identifier", "dataset_id", name="uq_source_dataset_checkpoint"),
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    source_identifier: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    dataset_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("datasets.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    cursor_column: Mapped[str] = mapped_column(String(100), nullable=False)
+    watermark_value: Mapped[str] = mapped_column(String(255), nullable=False)
+    records_extracted: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_run_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )

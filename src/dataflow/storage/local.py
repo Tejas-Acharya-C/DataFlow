@@ -159,3 +159,7 @@ class LocalStorageManager:
             return False
         except Exception:
             return False
+
+    def read_bytes(self, relative_path: str) -> bytes:
+        """Read raw bytes of a stored artifact safely."""
+        return self.get_absolute_path(relative_path).read_bytes()

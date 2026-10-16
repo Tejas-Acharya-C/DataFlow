@@ -228,7 +228,10 @@ class TransformationService:
             original_df = self.storage.load_dataframe(version.storage_path)
             transformed_df = TransformationEngine.apply_operations(original_df, operations)
 
-            dataset = db.get(Dataset, version.dataset_id)
+            stmt = select(Dataset).where(Dataset.id == version.dataset_id)
+            if db.bind and db.bind.dialect.name == "postgresql":
+                stmt = stmt.with_for_update()
+            dataset = db.scalar(stmt)
             if not dataset:
                 raise TransformationError(f"Parent dataset {version.dataset_id} not found.")
 
@@ -292,7 +295,9 @@ class TransformationService:
 
         except Exception as exc:
             db.rollback()
-            complete_job(db, job, status="failed", error_message=str(exc))
+            from dataflow.services.retry import classify_exception
+            err_category = classify_exception(exc)
+            complete_job(db, job, status="failed", error_message=str(exc), error_category=err_category)
             log_audit(
                 db,
                 event_type="transformation.failed",
@@ -301,6 +306,6 @@ class TransformationService:
                 outcome="failure",
                 dataset_id=version.dataset_id,
                 version_id=version.id,
-                details={"error": str(exc)},
+                details={"error": str(exc), "error_category": err_category},
             )
             raise

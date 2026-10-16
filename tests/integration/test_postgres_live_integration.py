@@ -1,12 +1,13 @@
-"""Integration tests running against the live PostgreSQL container."""
-
 import io
+import os
 import uuid
 
 import pytest
 from sqlalchemy import create_engine, delete, select, text
 from sqlalchemy.orm import sessionmaker
 
+from dataflow.config import get_settings
+from dataflow.db.base import Base
 from dataflow.models.contract import DataContract, ValidationRun
 from dataflow.models.dataset import Dataset
 from dataflow.models.profiling import ProfilingResult, QualityResult
@@ -17,18 +18,41 @@ from dataflow.services.quality import QualityService
 from dataflow.services.transformation import TransformationService
 from dataflow.services.validation import ValidationService
 
-PG_URL = "postgresql+psycopg://dataflow:dataflow_secret_password@localhost:55432/dataflow"
+
+def get_test_pg_url() -> str:
+    """Resolve PostgreSQL connection URL for integration testing."""
+    if os.environ.get("TEST_DATABASE_URL"):
+        return os.environ["TEST_DATABASE_URL"]
+    env_url = os.environ.get("DATAFLOW_DATABASE_URL", "")
+    if "postgres" in env_url:
+        return env_url
+    settings_url = get_settings().get_effective_database_url()
+    if "postgres" in settings_url:
+        return settings_url
+    return "postgresql+psycopg://dataflow:dataflow_secret_password@localhost:55432/dataflow"
 
 
 @pytest.fixture(scope="module")
 def pg_session():
-    """Connect to live PostgreSQL container or skip if unavailable."""
+    """Connect to live PostgreSQL container or fail in CI / skip if locally unavailable."""
+    pg_url = get_test_pg_url()
+    require_pg = bool(os.environ.get("REQUIRE_POSTGRES_TEST") or os.environ.get("CI"))
+
     try:
-        engine = create_engine(PG_URL, pool_pre_ping=True)
+        engine = create_engine(pg_url, pool_pre_ping=True)
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
     except Exception as exc:
-        pytest.skip(f"Live PostgreSQL container not reachable: {exc}")
+        if require_pg:
+            pytest.fail(
+                f"PostgreSQL integration test is required in CI, but database connection failed at {pg_url}: {exc}"
+            )
+        pytest.skip(
+            f"Live PostgreSQL not reachable at {pg_url}. Start with `docker compose up -d` to run live integration tests: {exc}"
+        )
+
+    # Ensure schema is ready
+    Base.metadata.create_all(bind=engine)
 
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     session = SessionLocal()

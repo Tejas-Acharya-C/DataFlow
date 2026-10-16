@@ -24,10 +24,20 @@ if config.config_file_name is not None:
 # Model metadata for 'autogenerate' support
 target_metadata = Base.metadata
 
-# Override URL with application configuration setting
-settings = get_settings()
-effective_url = settings.get_effective_database_url()
+# Resolve effective database URL:
+# 1. Respect explicit CLI or programmatic Alembic configuration (sqlalchemy.url or -x url=...)
+# 2. Fall back to application configuration setting only when no explicit URL is configured
+x_args = context.get_x_argument(as_dictionary=True)
+explicit_url = x_args.get("url") or x_args.get("db_url") or config.get_main_option("sqlalchemy.url")
+
+if explicit_url and explicit_url.strip():
+    effective_url = explicit_url.strip()
+else:
+    settings = get_settings()
+    effective_url = settings.get_effective_database_url()
+
 config.set_main_option("sqlalchemy.url", effective_url)
+
 
 
 def run_migrations_offline() -> None:

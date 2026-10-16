@@ -43,9 +43,16 @@ jobs:
         run: |
           ruff check src tests
 
+      - name: Run Database Migrations
+        env:
+          DATAFLOW_DATABASE_URL: postgresql+psycopg://dataflow:dataflow_password@localhost:5432/dataflow_ci
+        run: |
+          alembic upgrade head
+
       - name: Run Backend Tests
         env:
           DATAFLOW_DATABASE_URL: postgresql+psycopg://dataflow:dataflow_password@localhost:5432/dataflow_ci
+          REQUIRE_POSTGRES_TEST: "1"
         run: |
           pytest -v
 

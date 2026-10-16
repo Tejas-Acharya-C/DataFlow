@@ -29,6 +29,7 @@ def upload_csv(
     name: Optional[str] = Form(None),
     dataset_id: Optional[str] = Form(None),
     description: Optional[str] = Form(None),
+    deduplicate_identical: bool = Form(True),
     db: Session = Depends(get_db),
     service: IngestionService = Depends(get_ingestion_service),
 ):
@@ -44,6 +45,7 @@ def upload_csv(
             dataset_name=name,
             dataset_id=dataset_id,
             description=description,
+            deduplicate_identical=deduplicate_identical,
         )
     except IngestionError as ie:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ie))

@@ -39,9 +39,13 @@ class ProcessingJob(Base):
     )
     status: Mapped[str] = mapped_column(
         String(50), nullable=False, default="pending", index=True
-    )  # pending, running, succeeded, failed
+    )  # pending, running, succeeded, failed, retried, interrupted
     progress: Mapped[int] = mapped_column(Integer, default=0, nullable=False)  # 0 to 100
+    attempts: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    error_category: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)  # transient, permanent, etc.
+    duration_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     metadata_json: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False, index=True

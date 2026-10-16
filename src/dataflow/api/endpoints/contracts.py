@@ -3,21 +3,25 @@
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from dataflow.api.deps import get_db, get_validation_service
+from dataflow.api.deps import get_db, get_storage_manager, get_validation_service
 from dataflow.models.contract import DataContract, ValidationRun
 from dataflow.models.dataset import DatasetVersion
 from dataflow.schemas.contract import (
     ContractCreate,
     ContractResponse,
     ContractUpdate,
+    ValidationRejectionListResponse,
+    ValidationRejectionResponse,
     ValidationRunResponse,
 )
 from dataflow.services.audit import log_audit
 from dataflow.services.validation import ValidationService
+from dataflow.storage.local import LocalStorageManager
 
 router = APIRouter(tags=["Contracts & Validation"])
 
@@ -198,3 +202,66 @@ def get_validation_run(
     if not run:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Validation run not found.")
     return run
+
+
+@router.get("/validations/{run_id}/rejections", response_model=ValidationRejectionListResponse)
+def get_validation_rejections(
+    run_id: str,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=100),
+    db: Session = Depends(get_db),
+    service: ValidationService = Depends(get_validation_service),
+):
+    """Retrieve paginated row-level rejected records and failure reasons for a validation run."""
+    run = db.get(ValidationRun, run_id)
+    if not run:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Validation run not found.")
+
+    items, total = service.get_rejections(db, run_id=run_id, skip=skip, limit=limit)
+    return ValidationRejectionListResponse(
+        items=[ValidationRejectionResponse.model_validate(it) for it in items],
+        total=total,
+        run_id=run_id,
+        accepted_rows=run.accepted_rows,
+        rejected_rows=run.rejected_rows,
+    )
+
+
+@router.get("/validations/{run_id}/quarantine/download")
+def download_quarantine_records(
+    run_id: str,
+    db: Session = Depends(get_db),
+    storage: LocalStorageManager = Depends(get_storage_manager),
+):
+    """Download quarantined invalid records as CSV."""
+    run = db.get(ValidationRun, run_id)
+    if not run:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Validation run not found.")
+    if not run.quarantine_path:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No quarantined records for this run.")
+
+    return StreamingResponse(
+        storage.file_stream(run.quarantine_path),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="quarantine_{run_id[:8]}.csv"'},
+    )
+
+
+@router.get("/validations/{run_id}/clean/download")
+def download_clean_records(
+    run_id: str,
+    db: Session = Depends(get_db),
+    storage: LocalStorageManager = Depends(get_storage_manager),
+):
+    """Download validated clean records as CSV."""
+    run = db.get(ValidationRun, run_id)
+    if not run:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Validation run not found.")
+    if not run.clean_path:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No clean records for this run.")
+
+    return StreamingResponse(
+        storage.file_stream(run.clean_path),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="clean_{run_id[:8]}.csv"'},
+    )

@@ -26,6 +26,16 @@ async def lifespan(app: FastAPI):
     logger.info(f"Starting {settings.PROJECT_NAME} v{settings.VERSION} [{settings.ENVIRONMENT}]")
     storage = LocalStorageManager()
     logger.info(f"Storage root initialized at: {storage.root_path}")
+
+    # Reconcile any lingering jobs from previous crashes/restarts
+    try:
+        from dataflow.db.session import SessionLocal
+        from dataflow.services.audit import reconcile_stale_jobs
+        with SessionLocal() as db:
+            reconcile_stale_jobs(db)
+    except Exception as e:
+        logger.debug(f"Could not run startup job reconciliation: {e}")
+
     yield
     logger.info("Shutting down DataFlow application.")
 

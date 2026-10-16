@@ -19,14 +19,38 @@ import {
 
 const API_BASE = '/api/v1';
 
+let currentApiKey: string | null =
+  typeof window !== 'undefined' ? localStorage.getItem('dataflow_api_key') : null;
+
+export function setApiKey(key: string | null): void {
+  currentApiKey = key;
+  if (typeof window !== 'undefined') {
+    if (key) {
+      localStorage.setItem('dataflow_api_key', key);
+    } else {
+      localStorage.removeItem('dataflow_api_key');
+    }
+  }
+}
+
+export function getApiKey(): string | null {
+  return currentApiKey;
+}
+
 async function request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
   const url = `${API_BASE}${endpoint}`;
+  const headers: Record<string, string> = {
+    Accept: 'application/json',
+    ...((options.headers as Record<string, string>) || {}),
+  };
+
+  if (currentApiKey) {
+    headers['X-API-Key'] = currentApiKey;
+  }
+
   const response = await fetch(url, {
     ...options,
-    headers: {
-      Accept: 'application/json',
-      ...options.headers,
-    },
+    headers,
   });
 
   if (!response.ok) {
@@ -186,5 +210,36 @@ export const api = {
     const params = new URLSearchParams({ skip: String(skip), limit: String(limit) });
     if (datasetId) params.append('dataset_id', datasetId);
     return request<{ items: AuditEvent[]; total: number }>(`/audit?${params.toString()}`);
+  },
+
+  // Validation Rejections & Quarantine
+  getValidationRejections: (
+    validationId: string,
+    skip = 0,
+    limit = 50,
+    errorCode?: string
+  ): Promise<{ items: any[]; total: number }> => {
+    const params = new URLSearchParams({ skip: String(skip), limit: String(limit) });
+    if (errorCode) params.append('error_code', errorCode);
+    return request<{ items: any[]; total: number }>(`/contracts/validations/${validationId}/rejections?${params.toString()}`);
+  },
+
+  getQuarantineDownloadUrl: (validationId: string): string =>
+    `${API_BASE}/contracts/validations/${validationId}/quarantine/download`,
+
+  getCleanDownloadUrl: (validationId: string): string =>
+    `${API_BASE}/contracts/validations/${validationId}/clean/download`,
+
+  // Sources & Checkpoints
+  ingestRestSource: (config: any): Promise<any> =>
+    request<any>('/sources/rest/ingest', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(config),
+    }),
+
+  getCheckpoints: (datasetId?: string): Promise<any[]> => {
+    const qs = datasetId ? `?dataset_id=${datasetId}` : '';
+    return request<any[]>(`/sources/checkpoints${qs}`);
   },
 };

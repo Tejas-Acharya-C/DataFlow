@@ -18,6 +18,7 @@ def liveness():
 
 
 @router.get("/ready")
+@router.get("/readiness")
 def readiness(db: Session = Depends(get_db)):
     """Readiness probe verifying database and storage connectivity."""
     settings = get_settings()
